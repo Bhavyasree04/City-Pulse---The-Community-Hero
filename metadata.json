@@ -1,0 +1,10 @@
+{
+  "name": "Community Hero",
+  "description": "A smart civic issue reporting and management platform where Citizens, Volunteers, and Government Authorities collaborate to solve public issues efficiently.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

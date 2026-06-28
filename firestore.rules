@@ -1,0 +1,139 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == role;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Users collection rules
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if false; // Users can never list the entire directory of profiles
+      allow create: if isSignedIn() && request.auth.uid == userId
+                    && request.resource.data.uid == userId
+                    && request.resource.data.email is string
+                    && request.resource.data.fullName is string
+                    && request.resource.data.role is string
+                    && (request.resource.data.role == 'citizen' || request.resource.data.role == 'volunteer' || request.resource.data.role == 'authority');
+      
+      allow update: if isSignedIn() && request.auth.uid == userId
+                    && request.resource.data.uid == userId
+                    && request.resource.data.email == resource.data.email
+                    && request.resource.data.role == resource.data.role; // Role is immutable after signup
+    }
+
+    // 2. Complaints collection rules
+    match /complaints/{complaintId} {
+      
+      // Allow reading/listing complaints:
+      // Citizens can read and list complaints (including neighbors' alerts to like and support them)
+      // Volunteers and Authority can read all complaints to verify and assign
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+
+      // Create complaint: Any signed in user with citizen role can create
+      allow create: if isSignedIn()
+                    && request.resource.data.citizenUid == request.auth.uid
+                    && request.resource.data.issueType is string
+                    && request.resource.data.description is string
+                    && request.resource.data.status == 'Reported';
+
+      // Update complaint: Action-based precise updates
+      allow update: if isSignedIn() && (
+        // Action 1: Volunteer accepts/claims the verification dispatch
+        (
+          hasRole('volunteer') && 
+          request.resource.data.status == 'Volunteer Verification In Progress' &&
+          request.resource.data.assignedVolunteerId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'assignedVolunteerId', 'assignedVolunteerName'])
+        ) ||
+        // Action 2: Volunteer submits physical verification report
+        (
+          hasRole('volunteer') && 
+          resource.data.assignedVolunteerId == request.auth.uid &&
+          request.resource.data.status == 'Authority Verified' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'volunteerNotes', 'volunteerImages', 'isGenuine', 'volunteerVerificationDate'])
+        ) ||
+        // Action 3: Board authority approves a complaint
+        (
+          hasRole('authority') && 
+          request.resource.data.status == 'Authority Verified' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'authorityApprovalDate'])
+        ) ||
+        // Action 4: Board authority rejects a complaint
+        (
+          hasRole('authority') && 
+          request.resource.data.status == 'Rejected' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'rejectionReason'])
+        ) ||
+        // Action 5: Board authority assigns worker crew and shifts status to Repair In Progress
+        (
+          hasRole('authority') && 
+          request.resource.data.status == 'Repair In Progress' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'assignedDepartment', 'assignedWorkers', 'assignedWorkersPhone', 'expectedCompletionDate', 'repairStatusUpdates'])
+        ) ||
+        // Action 6: Board authority logs dynamic on-site repair progress
+        (
+          hasRole('authority') && 
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['repairStatusUpdates'])
+        ) ||
+        // Action 7: Board authority signs off and marks resolved
+        (
+          hasRole('authority') && 
+          request.resource.data.status == 'Resolved' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'completionNotes', 'completionImages', 'resolvedAt'])
+        ) ||
+        // Action 8: Assigned volunteer confirms repair work is done (transition to Work Done - Volunteer Confirmed)
+        (
+          hasRole('volunteer') &&
+          resource.data.assignedVolunteerId == request.auth.uid &&
+          request.resource.data.status == 'Work Done - Volunteer Confirmed' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'repairStatusUpdates'])
+        ) ||
+        // Action 9: Citizens support/like complaints
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'likedBy'])
+        )
+      );
+
+      // Citizens, volunteers, and authorities are not allowed to delete complaints once logged to preserve transparency
+      allow delete: if false;
+    }
+
+    // 3. Feedbacks collection rules
+    match /feedbacks/{feedbackId} {
+      allow get: if isSignedIn() && (resource.data.citizenEmail == request.auth.token.email || hasRole('authority'));
+      allow list: if isSignedIn() && (resource.data.citizenEmail == request.auth.token.email || hasRole('authority'));
+      
+      allow create: if isSignedIn()
+                    && request.resource.data.citizenEmail == request.auth.token.email
+                    && request.resource.data.type is string
+                    && request.resource.data.content is string;
+      
+      allow update, delete: if false; // Feedbacks are immutable logs
+    }
+  }
+}
